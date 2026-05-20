@@ -195,7 +195,7 @@ private:
         point.positions = initial_positions_;
 
         // Rotate ONLY joint_1
-        point.positions[0] = current_angle_ + 0.05;
+        point.positions[0] = current_angle_ + 0.18;
 
         // Motion duration
         point.time_from_start.sec = 1;
