@@ -109,7 +109,7 @@ static const double OBJECT_MIN_H = 0.08;
 //Debug / esecuzione
 static const std::string MARKER_TOPIC = "nbv_markers";
 static const int    MAX_MARKER_CANDS  = 12;    // quanti candidati mostrare in rviz
-static const bool   EXECUTE_MOTION    = false;  // false = solo pianifica. Utile per rosbag o per testare in scenario reale senza movimento
+static const bool   EXECUTE_MOTION    = true;  // false = solo pianifica. Utile per rosbag o per testare in scenario reale senza movimento
 
 
 static inline octomap::point3d toOcto(const Eigen::Vector3d & v) {
@@ -121,7 +121,7 @@ static geometry_msgs::msg::Pose lookAtPose(const Eigen::Vector3d & eye,
                                            const Eigen::Vector3d & target)
 {
   Eigen::Vector3d z = (target - eye).normalized();
-  Eigen::Vector3d up(0, 0, 1);
+  Eigen::Vector3d up(0, 0, -1);
   if (std::abs(z.dot(up)) > 0.95) up = Eigen::Vector3d(1, 0, 0);
   Eigen::Vector3d x = up.cross(z).normalized();
   Eigen::Vector3d y = z.cross(x);
