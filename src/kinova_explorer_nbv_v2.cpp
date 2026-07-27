@@ -1,5 +1,5 @@
 // =============================================================================
-// kinova_explorer_nbv.cpp   !!!!v6 DEBUG --> aumentata cam_range pre guardare in profondità!!!!
+// kinova_explorer_nbv.cpp   !!!!v12 --> base virtuale: sposta Spot poi esegue il piano relativo gia' calcolato (no riacquisizione)!!!!
 
 
 #include <memory>
@@ -25,6 +25,7 @@
 
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/point.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
@@ -71,13 +72,17 @@ static const double ROI_Z_MIN = -0.85, ROI_Z_MAX = 1.30;   // fino al pavimento 
 static const double OCTREE_RES = 0.04;            // lato del voxel [m]
 static const double MAX_SENSOR_RANGE = 3.0;       // taglio raggi insert [m]
 
-// Origine del SENSORE (camere frontali di Spot) in base_link. Valore misurato dalla TF della bag: punto nel mezzo dei due fisheye frontali
-// spot_frontright_fisheye = (0.086, -0.041, -0.043)
-// spot_frontleft_fisheye  = (0.082,  0.032, -0.044)
-static const Eigen::Vector3d SENSOR_ORIGIN(0.084, 0.0, -0.044);
+// Origine del ray casting = posizione della CAMERA DEL BRACCIO (camera_link) in
+// base_link, letta dalla TF a ogni ciclo (vedi updateSensorOrigin). camera_link si
+// muove col braccio, quindi NON e' una costante. Il valore qui sotto e' solo il
+// FALLBACK se la TF non e' disponibile: midpoint delle due camere frontali di Spot
+// (comportamento delle versioni precedenti).
+//   spot_frontright_fisheye = (0.086, -0.041, -0.043)
+//   spot_frontleft_fisheye  = (0.082,  0.032, -0.044)
+static const Eigen::Vector3d SENSOR_ORIGIN_FALLBACK(0.084, 0.0, -0.044);
 
 // Spessore d'ombra marcato OCCUPATO dietro ogni superficie osservata (applicato solo lungo x del base_link). Usato sia per ragionamento sia per sicurezza di movit
-static const double DEPTH_UNCERTAINTY = 0.20;     // [m]
+static const double DEPTH_UNCERTAINTY = 0.10;     // [m]
 
 // Passo (in voxel) della scansione di occlusione: piu' grande = meno raggi = piu' veloce.
 static const int    SCAN_STRIDE  = 2;
@@ -85,7 +90,7 @@ static const int    SCAN_STRIDE  = 2;
 static const double LOOK_DEPTH   = 3.0;
 
 // Z del pavimento approssimata da altezza spot
-static const double FLOOR_Z = -0.84;
+static const double FLOOR_Z = -0.50; // -0.84
 
 // Variabile per alzare su z il target (come LOOK_DEPTH ma in altezza)
 static const double TARGET_MIN_Z = -0.60;
@@ -102,14 +107,32 @@ static const std::vector<double> WS_AZIM_DG = {-90, -60, -30, 0, 30, 60, 90}; //
 static const int    MAX_FRONTIER_EVAL = 600;   // sotto-campionamento per lo scoring
 static const int    MAX_PLAN_ATTEMPTS = 20;    // quanti candidati provare a pianificare
 
+// Traslazioni VIRTUALI di base_link lungo y (destra/sinistra) per valutare, con la
+// stessa identica logica, quali pose sarebbero ottimali se il CANE fosse spostato di
+// lato. 0.0 = posizione reale (l'unica realmente pianificabile/eseguibile); le altre
+// sono solo "what-if" valutate e disegnate in RViz. Modifica BASE_SHIFT_Y per l'entita' [m].
+static const double BASE_SHIFT_Y = 0.80;   // [m]
+static const std::vector<double> BASE_OFFSETS_Y = {0.0, BASE_SHIFT_Y, -BASE_SHIFT_Y};
+
 // Il blocco d'ombra "interessante" deve essere causato da un OGGETTO, non dal
 // pavimento: il voxel bloccante deve stare almeno OBJECT_MIN_H sopra il pavimento.
-static const double OBJECT_MIN_H = 0.08;
+static const double OBJECT_MIN_H = 0.12;
 
 //Debug / esecuzione
 static const std::string MARKER_TOPIC = "nbv_markers";
 static const int    MAX_MARKER_CANDS  = 12;    // quanti candidati mostrare in rviz
-static const bool   EXECUTE_MOTION    = true;  // false = solo pianifica. Utile per rosbag o per testare in scenario reale senza movimento
+static const bool   EXECUTE_MOTION    = false;  // false = solo pianifica. Utile per rosbag o per testare in scenario reale senza movimento
+
+//Movimento LATERALE di Spot (per realizzare una base virtuale). Il comando viene pubblicato
+//su goaltospot ed eseguito dal nodo Boston Dynamics in ascolto su quel topic. Valori TESTATI
+//sul robot reale (da NON mettere in dubbio): x=+0.8 -> Spot a DESTRA, x=-0.8 -> Spot a SINISTRA;
+//y=0; orientazione fissa (0,0,0.7071068,0.7071068); frame "spot_odom".
+static const std::string SPOT_GOAL_TOPIC = "goaltospot";
+static const std::string SPOT_GOAL_FRAME = "spot_odom";
+static const double SPOT_LATERAL_STEP = 0.80;      // [m] passo laterale (coerente con BASE_SHIFT_Y)
+static const double SPOT_GOAL_QZ = 0.7071068;      // orientazione fissa del comando (non modificare)
+static const double SPOT_GOAL_QW = 0.7071068;
+static const double SPOT_MOVE_WAIT_S = 12.0;       // [s] attesa (senza feedback) perche' Spot completi lo spostamento
 
 
 static inline octomap::point3d toOcto(const Eigen::Vector3d & v) {
@@ -117,12 +140,16 @@ static inline octomap::point3d toOcto(const Eigen::Vector3d & v) {
 }
 
 // Posa look-at: il frame comandato (camera_link, +z = asse ottico) punta il target.
+// Convenzione ottica: +z avanti (verso il target), +x a DESTRA, +y in BASSO.
+// Per ottenerla si usa come riferimento il "giu' del mondo" (0,0,-1): cosi'
+//   x = up × z  -> a destra ,  y = z × x  -> in basso.
+// (Con up = (0,0,+1) la camera risultava capovolta: x a sinistra, y in alto.)
 static geometry_msgs::msg::Pose lookAtPose(const Eigen::Vector3d & eye,
                                            const Eigen::Vector3d & target)
 {
   Eigen::Vector3d z = (target - eye).normalized();
   Eigen::Vector3d up(0, 0, -1);
-  if (std::abs(z.dot(up)) > 0.95) up = Eigen::Vector3d(1, 0, 0);
+  if (std::abs(z.dot(up)) > 0.95) up = Eigen::Vector3d(1, 0, 0);   // caso quasi verticale
   Eigen::Vector3d x = up.cross(z).normalized();
   Eigen::Vector3d y = z.cross(x);
   Eigen::Matrix3d R; R.col(0) = x; R.col(1) = y; R.col(2) = z;
@@ -134,7 +161,7 @@ static geometry_msgs::msg::Pose lookAtPose(const Eigen::Vector3d & eye,
   return p;
 }
 
-struct Candidate { Eigen::Vector3d eye; double score; };
+struct Candidate { Eigen::Vector3d eye; double score; double base_y; };  // base_y: traslazione y della base (0 = reale)
 
 // =============================================================================
 class KinovaNbvExplorer
@@ -164,6 +191,9 @@ public:
 
     marker_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
       MARKER_TOPIC, rclcpp::QoS(1).transient_local());
+
+    spot_goal_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
+      SPOT_GOAL_TOPIC, rclcpp::QoS(10));
 
     RCLCPP_INFO(node_->get_logger(), "KinovaNbvExplorer pronto. EE: %s",
                 move_group_.getEndEffectorLink().c_str());
@@ -206,12 +236,13 @@ public:
     return false;
   }
 
-  //UN ciclo di esplorazione next-best-view
+  //UN ciclo di esplorazione next-best-view.
   bool exploreOnce()
   {
     CloudT::Ptr cloud = getCloudInBase();
     if (!cloud) return false;
 
+    updateSensorOrigin();               // origine ray casting = camera_link (camera del braccio)
     buildOctree(cloud);                 // libero / occupato / sconosciuto
     bakeDepthUncertainty();             // ombra dietro le superfici -> occupato
     injectOctreeAsCollision();          // passo a movit forma reale ostacolo + ombra
@@ -224,7 +255,7 @@ public:
     Eigen::Vector3d target = centroid(occluded);
     if (LOOK_DEPTH > 0.0) {
       // spinta ORIZZONTALE (piu' a fondo dietro l'ostacolo)
-      Eigen::Vector3d d = target - SENSOR_ORIGIN; d.z() = 0.0;
+      Eigen::Vector3d d = target - sensor_origin_; d.z() = 0.0;
       if (d.norm() > 1e-6) target += d.normalized() * LOOK_DEPTH;
     }
     //Clamp: entro la ROI e sopra la quota minima del target (indipendente dal pavimento).
@@ -244,23 +275,50 @@ public:
       return false;
     }
 
-    // I candidati sono ordinati per score (gain + clearToTarget). viene poi testata la pianificazione con movit
-    // in quest'ordine e si esegue il primo raggiungibile
-    std::optional<Eigen::Vector3d> chosen;
+    // Log: miglior score per ciascuna base (reale + virtuali) — confronto what-if.
+    // cands e' ordinato per score decrescente, quindi il primo di ogni base e' il suo migliore.
+    for (double by : BASE_OFFSETS_Y) {
+      double best = -1.0;
+      for (const auto & c : cands) if (std::abs(c.base_y - by) < 1e-6) { best = c.score; break; }
+      RCLCPP_INFO(node_->get_logger(), "Base y=%+.2f: miglior score = %.1f", by, best);
+    }
+
+    // I candidati (di TUTTE le basi) sono ordinati per score. Si pianifica in quest'ordine e
+    // vince il PRIMO RAGGIUNGIBILE, anche se appartiene a una base virtuale.
+    //
+    // Come si testa una posa a base VIRTUALE: le coordinate di c.eye sono assolute in
+    // base_link, quindi chiedere quella posa al braccio reale non avrebbe senso (fino a
+    // ~1.6 m di distanza). Si testa invece la posa RELATIVA alla base spostata: se il cane
+    // fosse in y=base_y, nel nuovo base_link tutto il mondo risulterebbe traslato di -base_y.
+    // Traslando eye E target della stessa quantita' l'ORIENTAMENTO non cambia (la direzione
+    // look-at e' identica): cambia solo la posizione, che torna entro la portata del braccio.
+    // LIMITE: gli ostacoli NON vengono ritraslati, quindi per le basi virtuali la verifica e'
+    // cinematicamente valida ma solo approssimata sulle collisioni (al piu' conservativa).
+    std::optional<Candidate> chosen;
     moveit::planning_interface::MoveGroupInterface::Plan plan;
+    bool plan_eseguibile = false;   // true SOLO se il piano e' per la base reale
     int attempts = 0;
     for (auto & c : cands) {
       if (attempts >= MAX_PLAN_ATTEMPTS) break;
       ++attempts;
-      geometry_msgs::msg::Pose goal = lookAtPose(c.eye, target);
+      const bool base_virtuale = std::abs(c.base_y) > 1e-6;
+
+      Eigen::Vector3d eye_t = c.eye, target_t = target;
+      if (base_virtuale) { eye_t.y() -= c.base_y; target_t.y() -= c.base_y; }
+
+      geometry_msgs::msg::Pose goal = lookAtPose(eye_t, target_t);
       move_group_.setStartStateToCurrentState();
       move_group_.setPoseTarget(goal, CAMERA_FRAME);   // pianifica per la camera del braccio
       if (move_group_.plan(plan) != moveit::core::MoveItErrorCode::SUCCESS) continue;
 
-      chosen = c.eye;
+      chosen = c;
+      // SICUREZZA: il piano di una base virtuale porta il braccio alla posa RELATIVA, che
+      // NON e' il viewpoint voluto finche' il cane non si e' spostato. Non va mai eseguito.
+      plan_eseguibile = !base_virtuale;
       RCLCPP_INFO(node_->get_logger(),
-        "Viewpoint scelto (raggiungibile): score=%.2f, eye (%.2f, %.2f, %.2f).",
-        c.score, c.eye.x(), c.eye.y(), c.eye.z());
+        "Viewpoint scelto: score=%.2f, base y=%+.2f, eye (%.2f, %.2f, %.2f)%s",
+        c.score, c.base_y, c.eye.x(), c.eye.y(), c.eye.z(),
+        base_virtuale ? "  -- RICHIEDE SPOSTAMENTO DI SPOT" : "  (base reale, eseguibile)");
       break;
     }
 
@@ -272,6 +330,30 @@ public:
         "Nessuna posa raggiungibile tra i primi %d candidati.", MAX_PLAN_ATTEMPTS);
       return false;
     }
+    if (!plan_eseguibile) {
+      // La posa migliore in assoluto e' su una base VIRTUALE: per realizzarla si sposta
+      // PRIMA Spot lateralmente, poi si esegue il piano (RELATIVO) gia' calcolato per quel
+      // viewpoint. NB: NON si riacquisisce la scena ne' si ripianifica: e' un'approssimazione
+      // VOLUTA (il braccio si muove sulla base delle informazioni visive precedenti allo
+      // spostamento di Spot). Schema: scelta best view -> muovo Spot -> muovo il braccio.
+      if (!EXECUTE_MOTION) {
+        RCLCPP_WARN(node_->get_logger(),
+          "Posa migliore su base VIRTUALE y=%+.2f. EXECUTE_MOTION=false: niente spostamento ne' movimento.",
+          chosen->base_y);
+        return true;
+      }
+      // 1) PRIMA: muovi Spot lateralmente (destra/sinistra secondo la base scelta).
+      moveSpotLateral(chosen->base_y);
+      // 2) Attendi che Spot completi lo spostamento (nessun feedback: attesa fissa).
+      RCLCPP_INFO(node_->get_logger(),
+        "Attendo %.0f s che Spot completi lo spostamento...", SPOT_MOVE_WAIT_S);
+      rclcpp::sleep_for(std::chrono::milliseconds((int)(SPOT_MOVE_WAIT_S * 1000)));
+      // 3) DOPO: esegui il piano relativo gia' calcolato (nessuna riacquisizione/ripianificazione).
+      RCLCPP_INFO(node_->get_logger(),
+        "Spot spostato. Eseguo il movimento del braccio (piano relativo pre-calcolato)...");
+      move_group_.execute(plan);
+      return true;
+    }
     if (EXECUTE_MOTION) {
       RCLCPP_INFO(node_->get_logger(), "Esecuzione del movimento...");
       move_group_.execute(plan);
@@ -282,6 +364,57 @@ public:
   }
 
 private:
+  //Origine del ray casting = camera del braccio (camera_link) in base_link, letta da TF.
+  //camera_link si muove col braccio: va riletta a ogni ciclo (non e' una costante). Con
+  //un solo octree, l'origine incide su spazio libero, ombre e occlusione; se la TF non
+  //e' disponibile si torna al fallback (midpoint camere frontali Spot) con un warning.
+  bool updateSensorOrigin()
+  {
+    try {
+      auto tf = tf_buffer_.lookupTransform(
+        ARM_BASE_FRAME, CAMERA_FRAME, tf2::TimePointZero, 500ms);
+      sensor_origin_ = Eigen::Vector3d(tf.transform.translation.x,
+                                       tf.transform.translation.y,
+                                       tf.transform.translation.z);
+      RCLCPP_INFO(node_->get_logger(),
+        "Origine ray casting = camera_link (%.3f, %.3f, %.3f).",
+        sensor_origin_.x(), sensor_origin_.y(), sensor_origin_.z());
+      return true;
+    } catch (const tf2::TransformException & e) {
+      sensor_origin_ = SENSOR_ORIGIN_FALLBACK;
+      RCLCPP_WARN(node_->get_logger(),
+        "TF %s->%s non disponibile (%s). Uso fallback camere Spot (%.3f, %.3f, %.3f).",
+        ARM_BASE_FRAME.c_str(), CAMERA_FRAME.c_str(), e.what(),
+        sensor_origin_.x(), sensor_origin_.y(), sensor_origin_.z());
+      return false;
+    }
+  }
+
+  //Comanda a Spot uno spostamento LATERALE pubblicando su goaltospot (lo esegue il nodo
+  //Boston Dynamics in ascolto). Convenzione TESTATA sul robot reale (valori da non mettere
+  //in dubbio): x=+0.8 -> Spot a DESTRA, x=-0.8 -> Spot a SINISTRA; y=0; orientazione fissa.
+  //Mappatura dalla base scelta:
+  //  base_y > 0 = base virtuale a SINISTRA (+y di base_link) -> Spot a sinistra -> x = -0.8
+  //  base_y < 0 = base virtuale a DESTRA  (-y di base_link) -> Spot a destra   -> x = +0.8
+  void moveSpotLateral(double base_y)
+  {
+    geometry_msgs::msg::PoseStamped msg;
+    msg.header.frame_id = SPOT_GOAL_FRAME;
+    msg.header.stamp = node_->now();
+    msg.pose.position.x = (base_y > 0.0) ? -SPOT_LATERAL_STEP : SPOT_LATERAL_STEP;
+    msg.pose.position.y = 0.0;
+    msg.pose.position.z = 0.0;
+    msg.pose.orientation.x = 0.0;
+    msg.pose.orientation.y = 0.0;
+    msg.pose.orientation.z = SPOT_GOAL_QZ;
+    msg.pose.orientation.w = SPOT_GOAL_QW;
+    RCLCPP_INFO(node_->get_logger(),
+      "Spot: spostamento laterale -> topic '%s', x=%.2f (%s).",
+      SPOT_GOAL_TOPIC.c_str(), msg.pose.position.x,
+      (base_y > 0.0) ? "SINISTRA" : "DESTRA");
+    spot_goal_pub_->publish(msg);
+  }
+
   //Percezione: cloud -> base_link 
   CloudT::Ptr getCloudInBase()
   {
@@ -323,7 +456,7 @@ private:
     for (const auto & p : cloud->points)
       if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z))
         oc.push_back(p.x, p.y, p.z);
-    tree_->insertPointCloud(oc, toOcto(SENSOR_ORIGIN), MAX_SENSOR_RANGE);
+    tree_->insertPointCloud(oc, toOcto(sensor_origin_), MAX_SENSOR_RANGE);
     tree_->updateInnerOccupancy();
   }
 
@@ -345,7 +478,7 @@ private:
         occ.emplace_back(c.x(), c.y(), c.z());
       }
     for (const auto & c : occ) {
-      Eigen::Vector3d dir = (c - SENSOR_ORIGIN).normalized();   // lontano dal sensore
+      Eigen::Vector3d dir = (c - sensor_origin_).normalized();   // lontano dal sensore
       for (double d = OCTREE_RES; d <= DEPTH_UNCERTAINTY; d += OCTREE_RES) {
         Eigen::Vector3d p = c + dir * d;
         tree_->updateNode(toOcto(p), true);   // marca occupata l'ombra
@@ -395,10 +528,10 @@ private:
           if (classify(x, y, z) != Vox::UNKNOWN) continue;   // solo sconosciuto
           // in ombra dietro un oggetto
           Eigen::Vector3d v(x, y, z);
-          double dist = (v - SENSOR_ORIGIN).norm();
+          double dist = (v - sensor_origin_).norm();
           octomap::point3d end;
           bool blocked = tree_->castRay(
-            toOcto(SENSOR_ORIGIN), toOcto((v - SENSOR_ORIGIN).normalized()),
+            toOcto(sensor_origin_), toOcto((v - sensor_origin_).normalized()),
             end, true, dist - OCTREE_RES);
           if (blocked && end.z() > FLOOR_Z + OBJECT_MIN_H) out.push_back(v);
         }
@@ -444,26 +577,32 @@ private:
                                          const std::vector<Eigen::Vector3d> & fe)
   {
     std::vector<Candidate> cands;
-    const Eigen::Vector3d base(0.0, 0.0, 0.0);   // base del braccio = origine di base_link
-    for (double R : WS_RADII)
-      for (double eldg : WS_ELEV_DG)
-        for (double azdg : WS_AZIM_DG) {
-          double el = eldg * M_PI/180.0, az = azdg * M_PI/180.0;
-          Eigen::Vector3d dir(std::cos(el)*std::cos(az),
-                              std::cos(el)*std::sin(az),
-                              std::sin(el));
-          Eigen::Vector3d eye = base + R * dir;                 // dentro la portata
+    // Oltre alla base REALE (by=0) si valutano anche basi VIRTUALI traslate in y: le
+    // stesse pose prestabilite, ma "immaginando" il cane spostato di lato. Serve a
+    // capire se un riposizionamento del cane darebbe viste migliori. Solo by=0 verra'
+    // poi realmente pianificata/eseguita (vedi exploreOnce).
+    for (double by : BASE_OFFSETS_Y) {
+      const Eigen::Vector3d base(0.0, by, 0.0);   // origine (anche virtuale) della base del braccio
+      for (double R : WS_RADII)
+        for (double eldg : WS_ELEV_DG)
+          for (double azdg : WS_AZIM_DG) {
+            double el = eldg * M_PI/180.0, az = azdg * M_PI/180.0;
+            Eigen::Vector3d dir(std::cos(el)*std::cos(az),
+                                std::cos(el)*std::sin(az),
+                                std::sin(el));
+            Eigen::Vector3d eye = base + R * dir;                 // dentro la portata (della base virtuale)
 
-          if (eye.z() < FLOOR_Z + 0.05) continue;               // sopra il pavimento
-          if (classify(eye.x(), eye.y(), eye.z()) == Vox::OCC) continue;  // non in un ostacolo
+            if (eye.z() < FLOOR_Z + 0.05) continue;               // sopra il pavimento
+            if (classify(eye.x(), eye.y(), eye.z()) == Vox::OCC) continue;  // non in un ostacolo
 
-          Eigen::Vector3d axis = (target - eye).normalized();
-          double gain  = infoGain(eye, axis, fe);                // voxel occlusi visti
-          double clear = clearToTarget(eye, target);             // 0..1 avvicinamento alla vista
-          // Score graduale: il gain domina; se nessuno vede nulla, clear ordina
-          // comunque per "quanto ci si avvicina a vedere il target"
-          cands.push_back({eye, gain + clear});
-        }
+            Eigen::Vector3d axis = (target - eye).normalized();
+            double gain  = infoGain(eye, axis, fe);                // voxel occlusi visti (nella scena reale)
+            double clear = clearToTarget(eye, target);             // 0..1 avvicinamento alla vista
+            // Score graduale: il gain domina; se nessuno vede nulla, clear ordina
+            // comunque per "quanto ci si avvicina a vedere il target"
+            cands.push_back({eye, gain + clear, by});
+          }
+    }
 
     std::sort(cands.begin(), cands.end(),
       [](const Candidate & a, const Candidate & b){ return a.score > b.score; });
@@ -474,7 +613,7 @@ private:
   void publishMarkers(const Eigen::Vector3d & target,
                       const std::vector<Eigen::Vector3d> & frontier,
                       const std::vector<Candidate> & cands,
-                      const std::optional<Eigen::Vector3d> & chosen)
+                      const std::optional<Candidate> & chosen)
   {
     visualization_msgs::msg::MarkerArray arr;
     auto stamp = node_->now();
@@ -513,55 +652,104 @@ private:
       arr.markers.push_back(m);
     }
 
-    //CANDIDATI: frecce eye->target, verde(gain alto)->rosso(gain basso)
-    double gmax = cands.empty() ? 1.0 : cands.front().score;   // gia' ordinati desc
-    int n = std::min((int)cands.size(), MAX_MARKER_CANDS);
-    for (int i = 0; i < n; ++i) {
-      const auto & c = cands[i];
-      double t = (gmax > 0) ? c.score / gmax : 0.0;
-      auto m = base(visualization_msgs::msg::Marker::ARROW);
-      m.ns = "candidates";
-      geometry_msgs::msg::Point a, b;
-      a.x = c.eye.x(); a.y = c.eye.y(); a.z = c.eye.z();
-      b.x = target.x(); b.y = target.y(); b.z = target.z();
-      m.points.push_back(a); m.points.push_back(b);
-      m.scale.x = 0.008;   // diametro asta
-      m.scale.y = 0.02;    // diametro testa
-      m.scale.z = 0.03;    // lunghezza testa
-      m.color.r = (float)(1.0 - t); m.color.g = (float)t; m.color.a = 0.9f;
-      arr.markers.push_back(m);
+    //BASI VIRTUALI: box translucido di Spot in ogni posizione y "immaginata" (by != 0),
+    //cosi' in RViz si vede dove sarebbe il cane. Colori: +y azzurro, -y arancio.
+    for (double by : BASE_OFFSETS_Y) {
+      if (std::abs(by) < 1e-6) continue;   // la base reale e' gia' la protection zone
+      auto bm = base(visualization_msgs::msg::Marker::CUBE);
+      bm.ns = "virtual_bases";
+      bm.pose.position.x = SPOT_CENTER_X;
+      bm.pose.position.y = SPOT_CENTER_Y + by;
+      bm.pose.position.z = SPOT_CENTER_Z;
+      bm.scale.x = SPOT_L; bm.scale.y = SPOT_W; bm.scale.z = SPOT_H;
+      bm.color.r = (by > 0 ? 0.2f : 1.0f); bm.color.g = 0.6f; bm.color.b = (by > 0 ? 1.0f : 0.2f); bm.color.a = 0.15f;
+      arr.markers.push_back(bm);
 
-      if (i < 5) {   // valore di gain scritto sopra i primi candidati
-        auto tx = base(visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
-        tx.ns = "gain";
-        tx.pose.position.x = c.eye.x(); tx.pose.position.y = c.eye.y();
-        tx.pose.position.z = c.eye.z() + 0.05;
-        tx.scale.z = 0.04;
-        tx.color.r = tx.color.g = tx.color.b = 1.0; tx.color.a = 1.0;
-        char buf[16]; std::snprintf(buf, sizeof(buf), "%.0f", c.score);
-        tx.text = buf;
-        arr.markers.push_back(tx);
+      auto tx = base(visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
+      tx.ns = "virtual_bases";
+      tx.pose.position.x = 0.0; tx.pose.position.y = by; tx.pose.position.z = 0.12;
+      tx.scale.z = 0.06;
+      tx.color.r = tx.color.g = tx.color.b = 1.0; tx.color.a = 1.0;
+      char lb[32]; std::snprintf(lb, sizeof(lb), "base y=%+.2f", by);
+      tx.text = lb;
+      arr.markers.push_back(tx);
+    }
+
+    //CANDIDATI per ogni base (reale + virtuali): frecce eye->target, verde(score alto)->rosso.
+    //Il colore e' normalizzato al MIGLIOR score GLOBALE, cosi' le basi si confrontano tra loro
+    //(la base che vede di piu' avra' frecce piu' verdi). Un namespace per base -> toggle in RViz.
+    double gmax = cands.empty() ? 1.0 : cands.front().score;   // cands gia' ordinati desc
+    const int PER_BASE = std::max(1, MAX_MARKER_CANDS / (int)BASE_OFFSETS_Y.size());
+    for (double by : BASE_OFFSETS_Y) {
+      char nsbuf[32]; std::snprintf(nsbuf, sizeof(nsbuf), "cand_y%+.2f", by);
+      int drawn = 0; bool firstOfBase = true;
+      for (const auto & c : cands) {
+        if (std::abs(c.base_y - by) > 1e-6) continue;   // solo i candidati di questa base
+        if (drawn >= PER_BASE) break;
+        ++drawn;
+        double t = (gmax > 0) ? c.score / gmax : 0.0;
+        auto m = base(visualization_msgs::msg::Marker::ARROW);
+        m.ns = nsbuf;
+        geometry_msgs::msg::Point a, b;
+        a.x = c.eye.x(); a.y = c.eye.y(); a.z = c.eye.z();
+        b.x = target.x(); b.y = target.y(); b.z = target.z();
+        m.points.push_back(a); m.points.push_back(b);
+        m.scale.x = 0.008;   // diametro asta
+        m.scale.y = 0.02;    // diametro testa
+        m.scale.z = 0.03;    // lunghezza testa
+        m.color.r = (float)(1.0 - t); m.color.g = (float)t; m.color.a = 0.9f;
+        arr.markers.push_back(m);
+
+        if (firstOfBase) {   // score del MIGLIOR candidato di questa base
+          firstOfBase = false;
+          auto tx = base(visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
+          tx.ns = nsbuf;
+          tx.pose.position.x = c.eye.x(); tx.pose.position.y = c.eye.y();
+          tx.pose.position.z = c.eye.z() + 0.05;
+          tx.scale.z = 0.04;
+          tx.color.r = tx.color.g = tx.color.b = 1.0; tx.color.a = 1.0;
+          char sb[16]; std::snprintf(sb, sizeof(sb), "%.0f", c.score);
+          tx.text = sb;
+          arr.markers.push_back(tx);
+        }
       }
     }
 
-    //VIEWPOINT SCELTO: sfera verde + freccia bianca (posa raggiungibile scelta)
+    //VIEWPOINT SCELTO: sfera + freccia bianca + etichetta.
+    //VERDE = base reale (eseguibile subito). ARANCIO = base virtuale (servirebbe spostare Spot).
     if (chosen) {
+      const bool virt = std::abs(chosen->base_y) > 1e-6;
       auto m = base(visualization_msgs::msg::Marker::SPHERE);
       m.ns = "chosen";
-      m.pose.position.x = chosen->x(); m.pose.position.y = chosen->y(); m.pose.position.z = chosen->z();
+      m.pose.position.x = chosen->eye.x(); m.pose.position.y = chosen->eye.y(); m.pose.position.z = chosen->eye.z();
       m.scale.x = m.scale.y = m.scale.z = 0.09;
-      m.color.g = 1.0; m.color.a = 1.0;
+      if (virt) { m.color.r = 1.0; m.color.g = 0.55; m.color.b = 0.0; }
+      else      { m.color.g = 1.0; }
+      m.color.a = 1.0;
       arr.markers.push_back(m);
 
       auto a = base(visualization_msgs::msg::Marker::ARROW);
       a.ns = "chosen_arrow";
       geometry_msgs::msg::Point p0, p1;
-      p0.x = chosen->x(); p0.y = chosen->y(); p0.z = chosen->z();
+      p0.x = chosen->eye.x(); p0.y = chosen->eye.y(); p0.z = chosen->eye.z();
       p1.x = target.x();  p1.y = target.y();  p1.z = target.z();
       a.points.push_back(p0); a.points.push_back(p1);
       a.scale.x = 0.015; a.scale.y = 0.035; a.scale.z = 0.05;
       a.color.r = a.color.g = a.color.b = 1.0; a.color.a = 1.0;
       arr.markers.push_back(a);
+
+      //Etichetta: toglie ogni ambiguita' su quale base sia la vincitrice
+      auto tx = base(visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
+      tx.ns = "chosen";
+      tx.pose.position.x = chosen->eye.x(); tx.pose.position.y = chosen->eye.y();
+      tx.pose.position.z = chosen->eye.z() + 0.13;
+      tx.scale.z = 0.05;
+      tx.color.r = tx.color.g = tx.color.b = 1.0; tx.color.a = 1.0;
+      char cb[80];
+      std::snprintf(cb, sizeof(cb), "SCELTA base y=%+.2f score=%.0f%s",
+                    chosen->base_y, chosen->score, virt ? " (spostare Spot)" : "");
+      tx.text = cb;
+      arr.markers.push_back(tx);
     }
 
     marker_pub_->publish(arr);
@@ -591,10 +779,12 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Client<moveit_msgs::srv::ApplyPlanningScene>::SharedPtr apply_client_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr spot_goal_pub_;
 
   std::mutex cloud_mtx_;
   sensor_msgs::msg::PointCloud2::SharedPtr last_cloud_;
   std::shared_ptr<octomap::OcTree> tree_;
+  Eigen::Vector3d sensor_origin_ = SENSOR_ORIGIN_FALLBACK;   // origine ray casting (camera_link, da TF)
 };
 
 // =============================================================================
