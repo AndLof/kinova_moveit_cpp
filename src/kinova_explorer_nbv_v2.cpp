@@ -1,7 +1,7 @@
 // =============================================================================
 // kinova_explorer_nbv.cpp   !!!!v12 --> base virtuale: sposta Spot poi esegue il piano relativo gia' calcolato (no riacquisizione)!!!!
-
-
+ 
+ 
 #include <memory>
 #include <vector>
 #include <thread>
@@ -12,9 +12,9 @@
 #include <optional>
 #include <future>
 #include <cstdio>
-
+ 
 #include <rclcpp/rclcpp.hpp>
-
+ 
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 #include <moveit_msgs/msg/collision_object.hpp>
@@ -22,56 +22,56 @@
 #include <moveit_msgs/msg/planning_scene.hpp>
 #include <moveit_msgs/srv/apply_planning_scene.hpp>
 #include <shape_msgs/msg/solid_primitive.hpp>
-
+ 
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
-
+ 
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2/exceptions.h>
 #include <tf2_sensor_msgs/tf2_sensor_msgs.hpp>
-
+ 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/filters/crop_box.h>
-
+ 
 #include <octomap/octomap.h>
 #include <octomap/OcTree.h>
 #include <octomap_msgs/conversions.h>
 #include <octomap_msgs/msg/octomap.hpp>
-
+ 
 #include <Eigen/Geometry>
-
+ 
 using namespace std::chrono_literals;
 using PointT = pcl::PointXYZ;
 using CloudT = pcl::PointCloud<PointT>;
-
+ 
 // ----------------------------- PARAMETRI -------------------------------------
 static const std::string PLANNING_GROUP = "manipulator";
 static const std::string CLOUD_TOPIC    = "/spot/pointcloud/merged";
 static const std::string ARM_BASE_FRAME = "base_link";
 static const std::string CAMERA_FRAME   = "camera_link";   // asse ottico = +z
-
+ 
 //Spot come box --> protection zone
 static const double SPOT_L = 1.10, SPOT_W = 0.50, SPOT_H = 0.84;
 static const double SPOT_CENTER_X = -0.30, SPOT_CENTER_Y = 0.00;
 static const double SPOT_TOP_Z    = 0.00;   // TF: spot_body e base_link stessa z (offset 0). Valutare se mettere offset per la piastra
 static const double SPOT_CENTER_Z = SPOT_TOP_Z - SPOT_H / 2.0;
-
+ 
 //ROI davanti a spot
 // ROI_X_MAX --> da incrementare per poter spingere piu in profondità il target con LOOK_DEPTH (occhio anche a CAM_RANGE)
 static const double ROI_X_MIN = 0.10,  ROI_X_MAX = 2.00;
 static const double ROI_Y_MIN = -1.00, ROI_Y_MAX = 1.00;
 static const double ROI_Z_MIN = -0.85, ROI_Z_MAX = 1.30;   // fino al pavimento (circa 0.84)
-
+ 
 //Octree
 static const double OCTREE_RES = 0.04;            // lato del voxel [m]
 static const double MAX_SENSOR_RANGE = 3.0;       // taglio raggi insert [m]
-
+ 
 // Origine del ray casting = posizione della CAMERA DEL BRACCIO (camera_link) in
 // base_link, letta dalla TF a ogni ciclo (vedi updateSensorOrigin). camera_link si
 // muove col braccio, quindi NON e' una costante. Il valore qui sotto e' solo il
@@ -80,49 +80,49 @@ static const double MAX_SENSOR_RANGE = 3.0;       // taglio raggi insert [m]
 //   spot_frontright_fisheye = (0.086, -0.041, -0.043)
 //   spot_frontleft_fisheye  = (0.082,  0.032, -0.044)
 static const Eigen::Vector3d SENSOR_ORIGIN_FALLBACK(0.084, 0.0, -0.044);
-
+ 
 // Spessore d'ombra marcato OCCUPATO dietro ogni superficie osservata (applicato solo lungo x del base_link). Usato sia per ragionamento sia per sicurezza di movit
 static const double DEPTH_UNCERTAINTY = 0.10;     // [m]
-
+ 
 // Passo (in voxel) della scansione di occlusione: piu' grande = meno raggi = piu' veloce.
 static const int    SCAN_STRIDE  = 2;
 // Variabile per "mirare" piu' in profondita' nella zona nascosta.
 static const double LOOK_DEPTH   = 3.0;
-
+ 
 // Z del pavimento approssimata da altezza spot
 static const double FLOOR_Z = -0.50; // -0.84
-
+ 
 // Variabile per alzare su z il target (come LOOK_DEPTH ma in altezza)
 static const double TARGET_MIN_Z = -0.60;
-
+ 
 //Camera dell'EE (per l'information gain)
 static const double CAM_HFOV  = 70.0 * M_PI / 180.0;  // FOV (cono) [rad]
 //Distanza massima di visuale (valore pessimistico)
 static const double CAM_RANGE = 4.0;
-
+ 
 //Campionamento viewpoint DENTRO il workspace del braccio (approssimazione)
 static const std::vector<double> WS_RADII   = {0.40, 0.60, 0.80};   // distanza sferica da base_link
 static const std::vector<double> WS_ELEV_DG = {-30, 0, 30, 60};     // elevazioni (z)
 static const std::vector<double> WS_AZIM_DG = {-90, -60, -30, 0, 30, 60, 90}; // azimut 0 = verso la scena (+x)
 static const int    MAX_FRONTIER_EVAL = 600;   // sotto-campionamento per lo scoring
 static const int    MAX_PLAN_ATTEMPTS = 20;    // quanti candidati provare a pianificare
-
+ 
 // Traslazioni VIRTUALI di base_link lungo y (destra/sinistra) per valutare, con la
 // stessa identica logica, quali pose sarebbero ottimali se il CANE fosse spostato di
 // lato. 0.0 = posizione reale (l'unica realmente pianificabile/eseguibile); le altre
 // sono solo "what-if" valutate e disegnate in RViz. Modifica BASE_SHIFT_Y per l'entita' [m].
 static const double BASE_SHIFT_Y = 0.80;   // [m]
 static const std::vector<double> BASE_OFFSETS_Y = {0.0, BASE_SHIFT_Y, -BASE_SHIFT_Y};
-
+ 
 // Il blocco d'ombra "interessante" deve essere causato da un OGGETTO, non dal
 // pavimento: il voxel bloccante deve stare almeno OBJECT_MIN_H sopra il pavimento.
 static const double OBJECT_MIN_H = 0.12;
-
+ 
 //Debug / esecuzione
 static const std::string MARKER_TOPIC = "nbv_markers";
 static const int    MAX_MARKER_CANDS  = 12;    // quanti candidati mostrare in rviz
-static const bool   EXECUTE_MOTION    = false;  // false = solo pianifica. Utile per rosbag o per testare in scenario reale senza movimento
-
+static const bool   EXECUTE_MOTION    = true;  // false = solo pianifica. Utile per rosbag o per testare in scenario reale senza movimento
+ 
 //Movimento LATERALE di Spot (per realizzare una base virtuale). Il comando viene pubblicato
 //su goaltospot ed eseguito dal nodo Boston Dynamics in ascolto su quel topic. Valori TESTATI
 //sul robot reale (da NON mettere in dubbio): x=+0.8 -> Spot a DESTRA, x=-0.8 -> Spot a SINISTRA;
@@ -133,12 +133,12 @@ static const double SPOT_LATERAL_STEP = 0.80;      // [m] passo laterale (coeren
 static const double SPOT_GOAL_QZ = 0.7071068;      // orientazione fissa del comando (non modificare)
 static const double SPOT_GOAL_QW = 0.7071068;
 static const double SPOT_MOVE_WAIT_S = 12.0;       // [s] attesa (senza feedback) perche' Spot completi lo spostamento
-
-
+ 
+ 
 static inline octomap::point3d toOcto(const Eigen::Vector3d & v) {
   return octomap::point3d((float)v.x(), (float)v.y(), (float)v.z());
 }
-
+ 
 // Posa look-at: il frame comandato (camera_link, +z = asse ottico) punta il target.
 // Convenzione ottica: +z avanti (verso il target), +x a DESTRA, +y in BASSO.
 // Per ottenerla si usa come riferimento il "giu' del mondo" (0,0,-1): cosi'
@@ -160,9 +160,9 @@ static geometry_msgs::msg::Pose lookAtPose(const Eigen::Vector3d & eye,
   p.orientation.z = q.z(); p.orientation.w = q.w();
   return p;
 }
-
+ 
 struct Candidate { Eigen::Vector3d eye; double score; double base_y; };  // base_y: traslazione y della base (0 = reale)
-
+ 
 // =============================================================================
 class KinovaNbvExplorer
 {
@@ -178,27 +178,27 @@ public:
     move_group_.setNumPlanningAttempts(10);
     move_group_.setMaxVelocityScalingFactor(0.10);
     move_group_.setMaxAccelerationScalingFactor(0.10);
-
+ 
     cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
       CLOUD_TOPIC, rclcpp::SensorDataQoS(),
       [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         std::lock_guard<std::mutex> lk(cloud_mtx_);
         last_cloud_ = msg;
       });
-
+ 
     apply_client_ = node_->create_client<moveit_msgs::srv::ApplyPlanningScene>(
       "apply_planning_scene");
-
+ 
     marker_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
       MARKER_TOPIC, rclcpp::QoS(1).transient_local());
-
+ 
     spot_goal_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
       SPOT_GOAL_TOPIC, rclcpp::QoS(10));
-
+ 
     RCLCPP_INFO(node_->get_logger(), "KinovaNbvExplorer pronto. EE: %s",
                 move_group_.getEndEffectorLink().c_str());
   }
-
+ 
   //Protection zone per Spot (attached object su base_link in modo da non essere fisso nel mondo)
   void addSpotProtectionZone()
   {
@@ -215,7 +215,7 @@ public:
     spot.primitives.push_back(box);
     spot.primitive_poses.push_back(pose);
     spot.operation = spot.ADD;
-
+ 
     moveit_msgs::msg::AttachedCollisionObject attached;
     attached.link_name = ARM_BASE_FRAME;
     attached.object = spot;
@@ -224,7 +224,7 @@ public:
     rclcpp::sleep_for(1s);
     RCLCPP_INFO(node_->get_logger(), "Protection zone Spot aggiunta.");
   }
-
+ 
   bool waitForCloud(std::chrono::seconds timeout)
   {
     auto start = node_->now();
@@ -235,18 +235,18 @@ public:
     }
     return false;
   }
-
+ 
   //UN ciclo di esplorazione next-best-view.
   bool exploreOnce()
   {
     CloudT::Ptr cloud = getCloudInBase();
     if (!cloud) return false;
-
+ 
     updateSensorOrigin();               // origine ray casting = camera_link (camera del braccio)
     buildOctree(cloud);                 // libero / occupato / sconosciuto
     bakeDepthUncertainty();             // ombra dietro le superfici -> occupato
     injectOctreeAsCollision();          // passo a movit forma reale ostacolo + ombra
-
+ 
     std::vector<Eigen::Vector3d> occluded = collectOccluded();
     if (occluded.empty()) {
       RCLCPP_INFO(node_->get_logger(), "Nessuna zona occlusa da esplorare.");
@@ -265,16 +265,16 @@ public:
     RCLCPP_INFO(node_->get_logger(),
       "Volume occluso: %zu voxel, target (%.2f, %.2f, %.2f)",
       occluded.size(), target.x(), target.y(), target.z());
-
+ 
     std::vector<Eigen::Vector3d> fe = subsample(occluded, MAX_FRONTIER_EVAL);
-
+ 
     std::vector<Candidate> cands = buildCandidates(target, fe);
     if (cands.empty()) {
       RCLCPP_WARN(node_->get_logger(), "Nessuna posa candidata valida.");
       publishMarkers(target, fe, cands, std::nullopt);
       return false;
     }
-
+ 
     // Log: miglior score per ciascuna base (reale + virtuali) — confronto what-if.
     // cands e' ordinato per score decrescente, quindi il primo di ogni base e' il suo migliore.
     for (double by : BASE_OFFSETS_Y) {
@@ -282,7 +282,7 @@ public:
       for (const auto & c : cands) if (std::abs(c.base_y - by) < 1e-6) { best = c.score; break; }
       RCLCPP_INFO(node_->get_logger(), "Base y=%+.2f: miglior score = %.1f", by, best);
     }
-
+ 
     // I candidati (di TUTTE le basi) sono ordinati per score. Si pianifica in quest'ordine e
     // vince il PRIMO RAGGIUNGIBILE, anche se appartiene a una base virtuale.
     //
@@ -302,15 +302,15 @@ public:
       if (attempts >= MAX_PLAN_ATTEMPTS) break;
       ++attempts;
       const bool base_virtuale = std::abs(c.base_y) > 1e-6;
-
+ 
       Eigen::Vector3d eye_t = c.eye, target_t = target;
       if (base_virtuale) { eye_t.y() -= c.base_y; target_t.y() -= c.base_y; }
-
+ 
       geometry_msgs::msg::Pose goal = lookAtPose(eye_t, target_t);
       move_group_.setStartStateToCurrentState();
       move_group_.setPoseTarget(goal, CAMERA_FRAME);   // pianifica per la camera del braccio
       if (move_group_.plan(plan) != moveit::core::MoveItErrorCode::SUCCESS) continue;
-
+ 
       chosen = c;
       // SICUREZZA: il piano di una base virtuale porta il braccio alla posa RELATIVA, che
       // NON e' il viewpoint voluto finche' il cane non si e' spostato. Non va mai eseguito.
@@ -321,10 +321,10 @@ public:
         base_virtuale ? "  -- RICHIEDE SPOSTAMENTO DI SPOT" : "  (base reale, eseguibile)");
       break;
     }
-
+ 
     // Pubblico markers in rviz: target, frontiera, candidati e il viewpoint scelto.
     publishMarkers(target, fe, cands, chosen);
-
+ 
     if (!chosen) {
       RCLCPP_ERROR(node_->get_logger(),
         "Nessuna posa raggiungibile tra i primi %d candidati.", MAX_PLAN_ATTEMPTS);
@@ -362,7 +362,7 @@ public:
     }
     return true;
   }
-
+ 
 private:
   //Origine del ray casting = camera del braccio (camera_link) in base_link, letta da TF.
   //camera_link si muove col braccio: va riletta a ogni ciclo (non e' una costante). Con
@@ -389,7 +389,7 @@ private:
       return false;
     }
   }
-
+ 
   //Comanda a Spot uno spostamento LATERALE pubblicando su goaltospot (lo esegue il nodo
   //Boston Dynamics in ascolto). Convenzione TESTATA sul robot reale (valori da non mettere
   //in dubbio): x=+0.8 -> Spot a DESTRA, x=-0.8 -> Spot a SINISTRA; y=0; orientazione fissa.
@@ -414,14 +414,14 @@ private:
       (base_y > 0.0) ? "SINISTRA" : "DESTRA");
     spot_goal_pub_->publish(msg);
   }
-
+ 
   //Percezione: cloud -> base_link 
   CloudT::Ptr getCloudInBase()
   {
     sensor_msgs::msg::PointCloud2::SharedPtr raw;
     { std::lock_guard<std::mutex> lk(cloud_mtx_); raw = last_cloud_; }
     if (!raw) return nullptr;
-
+ 
     sensor_msgs::msg::PointCloud2 in_base;
     try {
       auto tf = tf_buffer_.lookupTransform(
@@ -434,7 +434,7 @@ private:
     CloudT::Ptr cloud(new CloudT);
     pcl::fromROSMsg(in_base, *cloud);
     if (cloud->empty()) return nullptr;
-
+ 
     // Ritaglio nella ROI per limitare il costo dell'octree (ed escludere ostacoli troppo laterali)
     CloudT::Ptr roi(new CloudT);
     pcl::CropBox<PointT> crop;
@@ -444,7 +444,7 @@ private:
     crop.filter(*roi);
     return roi->empty() ? nullptr : roi;
   }
-
+ 
   //Costruzione octree con raycasting dal sensore:
   //insertPointCloud definisce libero lo spazio lungo i raggi tra sensore->punto e marca
   //occupato il punto finale. I voxel mai attraversati sono definiti sconosciuti
@@ -459,7 +459,7 @@ private:
     tree_->insertPointCloud(oc, toOcto(sensor_origin_), MAX_SENSOR_RANGE);
     tree_->updateInnerOccupancy();
   }
-
+ 
   enum class Vox { FREE, OCC, UNKNOWN };
   Vox classify(double x, double y, double z) const
   {
@@ -467,7 +467,7 @@ private:
     if (!n) return Vox::UNKNOWN;
     return tree_->isNodeOccupied(n) ? Vox::OCC : Vox::FREE;
   }
-
+ 
   //Strato d'ombra dietro le superfici: occupato (fino a DEPTH_UNCERTAINTY ovviamente)
   void bakeDepthUncertainty()
   {
@@ -486,7 +486,7 @@ private:
     }
     tree_->updateInnerOccupancy();
   }
-
+ 
   //Passo l'octree a MoveIt per collosion avoidance
   //Forma reale preservata (non AABB) + ombra di profondita' inclusa
   void injectOctreeAsCollision()
@@ -497,13 +497,13 @@ private:
       return;
     }
     omsg.header.frame_id = ARM_BASE_FRAME;
-
+ 
     auto req = std::make_shared<moveit_msgs::srv::ApplyPlanningScene::Request>();
     req->scene.is_diff = true;
     req->scene.world.octomap.header.frame_id = ARM_BASE_FRAME;
     req->scene.world.octomap.origin.orientation.w = 1.0;
     req->scene.world.octomap.octomap = omsg;
-
+ 
     if (!apply_client_->wait_for_service(3s)) {
       RCLCPP_WARN(node_->get_logger(), "apply_planning_scene non disponibile.");
       return;
@@ -515,7 +515,7 @@ private:
       RCLCPP_WARN(node_->get_logger(), "Iniezione octree non confermata.");
     rclcpp::sleep_for(300ms);
   }
-
+ 
   //Volume OCCLUSO: voxel sconosciuti in ombra dietro le superfici
   std::vector<Eigen::Vector3d> collectOccluded()
   {
@@ -537,7 +537,7 @@ private:
         }
     return out;
   }
-
+ 
   //Information gain: quanti voxel della frontiera vedrei da questo viewpoint
   double infoGain(const Eigen::Vector3d & cam, const Eigen::Vector3d & axis,
                   const std::vector<Eigen::Vector3d> & frontier) const
@@ -555,7 +555,7 @@ private:
     }
     return (double)vis;
   }
-
+ 
   //frazione [0..1] del raggio camera->target libera (prima di incontrare un ostacolo)
   // 1.0 = vista diretta del target; <1 = raggio bloccato, tanto piu' piccola quanto prima viene ostruito il raggio
   double clearToTarget(const Eigen::Vector3d & cam, const Eigen::Vector3d & target) const
@@ -569,7 +569,7 @@ private:
     double hitDist = (Eigen::Vector3d(end.x(), end.y(), end.z()) - cam).norm();
     return std::clamp(hitDist / dist, 0.0, 1.0);
   }
-
+ 
   //Generazione candidati attorno a base_link
   // I viewpoint sono campionati attorno alla BASE del braccio (origine di base_link),
   //Ogni candidato e' orientato verso il target e valutato con score = gain + clearToTarget (e successiva pianificazione di movit)
@@ -591,10 +591,10 @@ private:
                                 std::cos(el)*std::sin(az),
                                 std::sin(el));
             Eigen::Vector3d eye = base + R * dir;                 // dentro la portata (della base virtuale)
-
+ 
             if (eye.z() < FLOOR_Z + 0.05) continue;               // sopra il pavimento
             if (classify(eye.x(), eye.y(), eye.z()) == Vox::OCC) continue;  // non in un ostacolo
-
+ 
             Eigen::Vector3d axis = (target - eye).normalized();
             double gain  = infoGain(eye, axis, fe);                // voxel occlusi visti (nella scena reale)
             double clear = clearToTarget(eye, target);             // 0..1 avvicinamento alla vista
@@ -603,12 +603,12 @@ private:
             cands.push_back({eye, gain + clear, by});
           }
     }
-
+ 
     std::sort(cands.begin(), cands.end(),
       [](const Candidate & a, const Candidate & b){ return a.score > b.score; });
     return cands;
   }
-
+ 
   //Marker di debug per rviz
   void publishMarkers(const Eigen::Vector3d & target,
                       const std::vector<Eigen::Vector3d> & frontier,
@@ -628,7 +628,7 @@ private:
       m.pose.orientation.w = 1.0;   // lifetime di default = 0 = per sempre
       return m;
     };
-
+ 
     //TARGET: sfera magenta
     {
       auto m = base(visualization_msgs::msg::Marker::SPHERE);
@@ -638,7 +638,7 @@ private:
       m.color.r = 1.0; m.color.b = 1.0; m.color.a = 1.0;
       arr.markers.push_back(m);
     }
-
+ 
     //FRONTIERA OCCLUSA: cubetti semi trasparenti
     {
       auto m = base(visualization_msgs::msg::Marker::CUBE_LIST);
@@ -651,7 +651,7 @@ private:
       }
       arr.markers.push_back(m);
     }
-
+ 
     //BASI VIRTUALI: box translucido di Spot in ogni posizione y "immaginata" (by != 0),
     //cosi' in RViz si vede dove sarebbe il cane. Colori: +y azzurro, -y arancio.
     for (double by : BASE_OFFSETS_Y) {
@@ -664,7 +664,7 @@ private:
       bm.scale.x = SPOT_L; bm.scale.y = SPOT_W; bm.scale.z = SPOT_H;
       bm.color.r = (by > 0 ? 0.2f : 1.0f); bm.color.g = 0.6f; bm.color.b = (by > 0 ? 1.0f : 0.2f); bm.color.a = 0.15f;
       arr.markers.push_back(bm);
-
+ 
       auto tx = base(visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
       tx.ns = "virtual_bases";
       tx.pose.position.x = 0.0; tx.pose.position.y = by; tx.pose.position.z = 0.12;
@@ -674,7 +674,7 @@ private:
       tx.text = lb;
       arr.markers.push_back(tx);
     }
-
+ 
     //CANDIDATI per ogni base (reale + virtuali): frecce eye->target, verde(score alto)->rosso.
     //Il colore e' normalizzato al MIGLIOR score GLOBALE, cosi' le basi si confrontano tra loro
     //(la base che vede di piu' avra' frecce piu' verdi). Un namespace per base -> toggle in RViz.
@@ -699,7 +699,7 @@ private:
         m.scale.z = 0.03;    // lunghezza testa
         m.color.r = (float)(1.0 - t); m.color.g = (float)t; m.color.a = 0.9f;
         arr.markers.push_back(m);
-
+ 
         if (firstOfBase) {   // score del MIGLIOR candidato di questa base
           firstOfBase = false;
           auto tx = base(visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
@@ -714,7 +714,7 @@ private:
         }
       }
     }
-
+ 
     //VIEWPOINT SCELTO: sfera + freccia bianca + etichetta.
     //VERDE = base reale (eseguibile subito). ARANCIO = base virtuale (servirebbe spostare Spot).
     if (chosen) {
@@ -727,7 +727,7 @@ private:
       else      { m.color.g = 1.0; }
       m.color.a = 1.0;
       arr.markers.push_back(m);
-
+ 
       auto a = base(visualization_msgs::msg::Marker::ARROW);
       a.ns = "chosen_arrow";
       geometry_msgs::msg::Point p0, p1;
@@ -737,7 +737,7 @@ private:
       a.scale.x = 0.015; a.scale.y = 0.035; a.scale.z = 0.05;
       a.color.r = a.color.g = a.color.b = 1.0; a.color.a = 1.0;
       arr.markers.push_back(a);
-
+ 
       //Etichetta: toglie ogni ambiguita' su quale base sia la vincitrice
       auto tx = base(visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
       tx.ns = "chosen";
@@ -751,12 +751,12 @@ private:
       tx.text = cb;
       arr.markers.push_back(tx);
     }
-
+ 
     marker_pub_->publish(arr);
     RCLCPP_INFO(node_->get_logger(), "Marker di debug pubblicati su '%s' (%zu marker).",
                 MARKER_TOPIC.c_str(), arr.markers.size());
   }
-
+ 
   
   static Eigen::Vector3d centroid(const std::vector<Eigen::Vector3d> & v) {
     Eigen::Vector3d c(0,0,0); for (auto & p : v) c += p; return c / (double)v.size();
@@ -769,7 +769,7 @@ private:
     for (size_t i = 0; i < v.size(); i += stride) out.push_back(v[i]);
     return out;
   }
-
+ 
   
   rclcpp::Node::SharedPtr node_;
   moveit::planning_interface::MoveGroupInterface move_group_;
@@ -780,26 +780,26 @@ private:
   rclcpp::Client<moveit_msgs::srv::ApplyPlanningScene>::SharedPtr apply_client_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr spot_goal_pub_;
-
+ 
   std::mutex cloud_mtx_;
   sensor_msgs::msg::PointCloud2::SharedPtr last_cloud_;
   std::shared_ptr<octomap::OcTree> tree_;
   Eigen::Vector3d sensor_origin_ = SENSOR_ORIGIN_FALLBACK;   // origine ray casting (camera_link, da TF)
 };
-
+ 
 // =============================================================================
 int main(int argc, char * argv[])
 {
   rclcpp::init(argc, argv);
   auto node = rclcpp::Node::make_shared("kinova_nbv_explorer");
-
+ 
   rclcpp::executors::SingleThreadedExecutor exec;
   exec.add_node(node);
   std::thread spin_thread([&exec]() { exec.spin(); });
-
+ 
   auto explorer = std::make_shared<KinovaNbvExplorer>(node);
   explorer->addSpotProtectionZone();
-
+ 
   RCLCPP_INFO(node->get_logger(), "In attesa della pointcloud...");
   if (explorer->waitForCloud(10s)) {
     explorer->exploreOnce();
@@ -812,7 +812,7 @@ int main(int argc, char * argv[])
   } else {
     RCLCPP_ERROR(node->get_logger(), "Nessuna pointcloud su %s", CLOUD_TOPIC.c_str());
   }
-
+ 
   rclcpp::shutdown();
   spin_thread.join();
   return 0;
