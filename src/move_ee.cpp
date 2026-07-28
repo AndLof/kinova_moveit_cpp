@@ -26,8 +26,31 @@ int main(int argc, char * argv[])
   static const std::string PLANNING_GROUP = "manipulator";
 
   moveit::planning_interface::MoveGroupInterface move_group(node, PLANNING_GROUP);
+  
+  RCLCPP_INFO(node->get_logger(), "Planning frame: %s",
+            move_group.getPlanningFrame().c_str());
+
+  RCLCPP_INFO(node->get_logger(), "End effector link: %s",
+            move_group.getEndEffectorLink().c_str());
+
+  geometry_msgs::msg::PoseStamped current = move_group.getCurrentPose();
+
+  RCLCPP_INFO(node->get_logger(),
+            "Current position: x=%.4f y=%.4f z=%.4f",
+            current.pose.position.x,
+            current.pose.position.y,
+            current.pose.position.z);
+
+  RCLCPP_INFO(node->get_logger(),
+            "Current orientation: x=%.4f y=%.4f z=%.4f w=%.4f",
+            current.pose.orientation.x,
+            current.pose.orientation.y,
+            current.pose.orientation.z,
+            current.pose.orientation.w);
+  
   //creare planning scene for protection zone
-  moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
+  //commento?
+  //moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
 
   // ----------------------------
   // 3. SET START STATE
@@ -37,29 +60,33 @@ int main(int argc, char * argv[])
   // ----------------------------
   // PROTECTION ZONE (BOX)
   // ----------------------------
-  moveit_msgs::msg::CollisionObject collision_object;
-  collision_object.header.frame_id = "base_link";  // importante
-  collision_object.id = "forbidden_box";
+  //commento?
+  //moveit_msgs::msg::CollisionObject collision_object;
+  //collision_object.header.frame_id = "base_link";  // importante
+  //collision_object.id = "forbidden_box";
 
   // dimensioni (metri)
-  shape_msgs::msg::SolidPrimitive primitive;
-  primitive.type = primitive.BOX;
-  primitive.dimensions = {0.1, 0.1, 0.1};  // 20cm x 20cm x 20cm
+  //commento?
+  //shape_msgs::msg::SolidPrimitive primitive;
+  //primitive.type = primitive.BOX;
+  //primitive.dimensions = {0.1, 0.1, 0.1};  // 20cm x 20cm x 20cm
 
   // posizione del box
-  geometry_msgs::msg::Pose box_pose;
-  box_pose.orientation.w = 1.0;
-  box_pose.position.x = -0.14;
-  box_pose.position.y = -0.36;
-  box_pose.position.z = 0.13;
+  //commento?
+  //geometry_msgs::msg::Pose box_pose;
+  //box_pose.orientation.w = 1.0;
+  //box_pose.position.x = -0.14;
+  //box_pose.position.y = -0.36;
+  //box_pose.position.z = 0.13;
 
   // assegnazione
-  collision_object.primitives.push_back(primitive);
-  collision_object.primitive_poses.push_back(box_pose);
-  collision_object.operation = collision_object.ADD;
+  //commento?
+  //collision_object.primitives.push_back(primitive);
+  //collision_object.primitive_poses.push_back(box_pose);
+  //collision_object.operation = collision_object.ADD;
 
   // aggiungi alla scena
-  planning_scene_interface.applyCollisionObject(collision_object);
+  //planning_scene_interface.applyCollisionObject(collision_object);
 
   // fondamentale: aspetta che MoveIt aggiorni la scena
   rclcpp::sleep_for(std::chrono::seconds(1));
@@ -83,9 +110,9 @@ int main(int argc, char * argv[])
   //target_pose.position.z = 0.8;
 
   //real robot test
-  target_pose.position.x = -0.1435;
-  target_pose.position.y = -0.6285;
-  target_pose.position.z = 0.4315;
+  //target_pose.position.x = -0.1435;
+  //target_pose.position.y = -0.6285;
+  //target_pose.position.z = 0.4315;
 
   // Quaternion (orientazione)
   //target_pose.orientation.x = 0.0;
@@ -105,10 +132,20 @@ int main(int argc, char * argv[])
   //target_pose.orientation.w = 0.0;
 
   //real robot test
-  target_pose.orientation.x = 0.6996;
-  target_pose.orientation.y = 0.0385;
-  target_pose.orientation.z = 0.0759;
-  target_pose.orientation.w = 0.7093;
+  //target_pose.orientation.x = 0.6996;
+  //target_pose.orientation.y = 0.0385;
+  //target_pose.orientation.z = 0.0759;
+  //target_pose.orientation.w = 0.7093;
+  
+  //position for real arm on spot -> home position
+  target_pose.position.x = 0.396;
+  target_pose.position.y = 0.018;
+  target_pose.position.z = 0.333;
+
+  target_pose.orientation.x = 0.488;
+  target_pose.orientation.y = 0.535;
+  target_pose.orientation.z = 0.497;
+  target_pose.orientation.w = 0.478;
 
   RCLCPP_INFO(node->get_logger(), "Setting pose goal...");
 
