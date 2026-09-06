@@ -93,12 +93,59 @@ target_link_libraries(kinova_explorer_nbv_v2
   Eigen3::Eigen
 )
 
+# --- nodo next-best-view v3 (spostamento laterale di Spot lungo y del corpo) ---
+add_executable(kinova_explorer_nbv_v3 src/kinova_explorer_nbv_v3.cpp)
+ament_target_dependencies(kinova_explorer_nbv_v3
+  rclcpp
+  moveit_ros_planning_interface
+  moveit_core
+  moveit_msgs
+  geometry_msgs
+  shape_msgs
+  sensor_msgs
+  tf2
+  tf2_ros
+  tf2_sensor_msgs
+  pcl_conversions
+  octomap_msgs
+  visualization_msgs # for debug
+)
+# PCL, OctoMap ed Eigen non sono pacchetti ament: si linkano qui
+target_link_libraries(kinova_explorer_nbv_v3
+  ${PCL_LIBRARIES}
+  ${OCTOMAP_LIBRARIES}
+  Eigen3::Eigen
+)
+
+add_executable(kinova_explorer_nbv_validation src/kinova_explorer_nbv_validation.cpp)
+ament_target_dependencies(kinova_explorer_nbv_validation
+  rclcpp
+  moveit_ros_planning_interface 
+  moveit_core 
+  moveit_msgs 
+  geometry_msgs
+  shape_msgs 
+  sensor_msgs 
+  tf2 
+  tf2_ros 
+  tf2_sensor_msgs 
+  pcl_conversions
+  octomap_msgs 
+  visualization_msgs)
+  
+target_link_libraries(kinova_explorer_nbv_validation
+  ${PCL_LIBRARIES} 
+  ${OCTOMAP_LIBRARIES} 
+  Eigen3::Eigen)
+
 install(TARGETS
   move_ee
   cartesian_path
   rotate_360
   rotate_base
   kinova_explorer_nbv_v2
+  kinova_explorer_nbv_v3
+  kinova_explorer_nbv_validation
   DESTINATION lib/${PROJECT_NAME}
 )
 
