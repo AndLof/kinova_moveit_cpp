@@ -48,6 +48,14 @@ ament_target_dependencies(move_ee
   geometry_msgs
 )
 
+add_executable(raise_arm src/raise_arm.cpp)
+ament_target_dependencies(raise_arm
+  rclcpp
+  moveit_ros_planning_interface
+  moveit_core
+  geometry_msgs
+)
+
 add_executable(cartesian_path src/cartesian_path.cpp)
 ament_target_dependencies(cartesian_path
   rclcpp
@@ -140,6 +148,7 @@ target_link_libraries(kinova_explorer_nbv_validation
 
 install(TARGETS
   move_ee
+  raise_arm
   cartesian_path
   rotate_360
   rotate_base
