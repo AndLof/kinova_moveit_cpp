@@ -57,7 +57,7 @@ static const std::string ARM_BASE_FRAME = "base_link";
 static const std::string CAMERA_FRAME   = "camera_link";   // asse ottico = +z
 
 //Spot come box --> protection zone
-static const double SPOT_L = 1.10, SPOT_W = 0.50, SPOT_H = 0.84;
+static const double SPOT_L = 1.10, SPOT_W = 0.70, SPOT_H = 0.84;
 static const double SPOT_CENTER_X = -0.30, SPOT_CENTER_Y = 0.00;
 static const double SPOT_TOP_Z    = 0.00;   // TF: spot_body e base_link stessa z (offset 0). Valutare se mettere offset per la piastra
 static const double SPOT_CENTER_Z = SPOT_TOP_Z - SPOT_H / 2.0;

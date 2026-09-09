@@ -59,7 +59,7 @@ static const std::string ARM_BASE_FRAME = "base_link";
 static const std::string CAMERA_FRAME   = "camera_link";   // asse ottico = +z
 
 //Spot come box --> protection zone
-static const double SPOT_L = 1.10, SPOT_W = 0.60, SPOT_H = 0.84;
+static const double SPOT_L = 1.10, SPOT_W = 0.75, SPOT_H = 0.84;
 static const double SPOT_CENTER_X = -0.30, SPOT_CENTER_Y = 0.00;
 static const double SPOT_TOP_Z    = 0.00;   // TF: spot_body e base_link stessa z (offset 0). Valutare se mettere offset per la piastra
 static const double SPOT_CENTER_Z = SPOT_TOP_Z - SPOT_H / 2.0;
@@ -103,7 +103,7 @@ static const double CAM_HFOV  = 70.0 * M_PI / 180.0;  // FOV (cono) [rad]
 static const double CAM_RANGE = 4.0;
 
 //Campionamento viewpoint DENTRO il workspace del braccio (approssimazione)
-static const std::vector<double> WS_RADII   = {0.40, 0.60, 0.80};   // distanza sferica da base_link
+static const std::vector<double> WS_RADII   = {0.45, 0.60, 0.80};   // distanza sferica da base_link
 static const std::vector<double> WS_ELEV_DG = {-30, 0, 30, 60};     // elevazioni (z)
 static const std::vector<double> WS_AZIM_DG = {-90, -60, -30, 0, 30, 60, 90}; // azimut 0 = verso la scena (+x)
 static const int    MAX_FRONTIER_EVAL = 600;   // sotto-campionamento per lo scoring
@@ -288,7 +288,7 @@ public:
 
     // =========================== MODALITA' VALIDAZIONE ===========================
     // Invece di scegliere ed eseguire in automatico la posa migliore, si costruisce una
-    // TABELLA di pose (per ogni base: 5 alte / 5 mediane / 5 basse per score) e si lascia
+    // TABELLA di pose (per ogni base: 10 alte / 10 mediane / 10 basse per score) e si lascia
     // scegliere all'operatore quale eseguire, digitandone l'ID a terminale. Serve a
     // dimostrare che dalla posa "buona" la persona nascosta e' visibile (YOLO) e dalle
     // altre no. La tabella e' una fotografia della scena iniziale: NON si aggiorna.
@@ -640,8 +640,8 @@ private:
     return cands;
   }
 
-  //Costruisce la tabella di validazione: per OGNI base, fino a 15 pose (5 alte, 5 mediane,
-  //5 basse per score). Se una base ha <=15 candidati, li mostra tutti senza duplicati.
+  //Costruisce la tabella di validazione: per OGNI base, fino a 30 pose (10 alte, 10 mediane,
+  //10 basse per score). Se una base ha <=30 candidati, li mostra tutti senza duplicati.
   //cands e' gia' ordinato per score decrescente, quindi il filtro per base preserva l'ordine.
   static std::vector<TableRow> buildTable(const std::vector<Candidate> & cands)
   {
@@ -652,14 +652,14 @@ private:
         if (std::abs(c.base_y - by) < 1e-6) v.push_back(c);
       if (v.empty()) continue;
 
-      if ((int)v.size() <= 15) {                 // poche pose: tutte, senza fasce
+      if ((int)v.size() <= 30) {                 // poche pose: tutte, senza fasce
         for (const auto & c : v) table.push_back({c, "-"});
-      } else {                                   // 5 alte / 5 mediane / 5 basse
+      } else {                                   // 10 alte / 10 mediane / 10 basse
         const int n = (int)v.size();
         const int mid = n / 2;
-        for (int i = 0; i < 5; ++i)              table.push_back({v[i], "ALTA"});
-        for (int i = mid - 2; i <= mid + 2; ++i) table.push_back({v[i], "MEDIANA"});
-        for (int i = n - 5; i < n; ++i)          table.push_back({v[i], "BASSA"});
+        for (int i = 0; i < 10; ++i)               table.push_back({v[i], "ALTA"});
+        for (int i = mid - 5; i <= mid + 4; ++i)   table.push_back({v[i], "MEDIANA"});
+        for (int i = n - 10; i < n; ++i)           table.push_back({v[i], "BASSA"});
       }
     }
     return table;
