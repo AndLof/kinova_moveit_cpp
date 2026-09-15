@@ -105,13 +105,13 @@ static const std::vector<double> WS_RADII   = {0.40, 0.60, 0.80};   // distanza 
 static const std::vector<double> WS_ELEV_DG = {-30, 0, 30, 60};     // elevazioni (z)
 static const std::vector<double> WS_AZIM_DG = {-90, -60, -30, 0, 30, 60, 90}; // azimut 0 = verso la scena (+x)
 static const int    MAX_FRONTIER_EVAL = 600;   // sotto-campionamento per lo scoring
-static const int    MAX_PLAN_ATTEMPTS = 20;    // quanti candidati provare a pianificare
+static const int    MAX_PLAN_ATTEMPTS = 50;    // quanti candidati provare a pianificare
 
 // Traslazioni VIRTUALI di base_link lungo y (destra/sinistra) per valutare, con la
 // stessa identica logica, quali pose sarebbero ottimali se il CANE fosse spostato di
 // lato. 0.0 = posizione reale (l'unica realmente pianificabile/eseguibile); le altre
 // sono solo "what-if" valutate e disegnate in RViz. Modifica BASE_SHIFT_Y per l'entita' [m].
-static const double BASE_SHIFT_Y = 0.80;   // [m]
+static const double BASE_SHIFT_Y = 0.50;   // [m]
 static const std::vector<double> BASE_OFFSETS_Y = {0.0, BASE_SHIFT_Y, -BASE_SHIFT_Y};
 
 // Il blocco d'ombra "interessante" deve essere causato da un OGGETTO, non dal
@@ -131,7 +131,7 @@ static const bool   EXECUTE_MOTION    = true;  // false = solo pianifica. Utile 
 static const std::string SPOT_GOAL_TOPIC = "goaltospot";
 static const std::string SPOT_GOAL_FRAME = "spot_odom";   // frame in cui e' espresso il goal (odom)
 static const std::string SPOT_BODY_FRAME = "spot_body";   // corpo di Spot (per leggere posa/yaw da TF)
-static const double SPOT_LATERAL_STEP = 0.80;      // [m] passo laterale lungo y_body (coerente con BASE_SHIFT_Y)
+static const double SPOT_LATERAL_STEP = 0.50;      // [m] passo laterale lungo y_body (coerente con BASE_SHIFT_Y)
 static const double SPOT_MOVE_WAIT_S = 12.0;       // [s] attesa (senza feedback) perche' Spot completi lo spostamento
 
 

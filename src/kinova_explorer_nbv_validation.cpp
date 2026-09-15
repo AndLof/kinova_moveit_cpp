@@ -113,7 +113,7 @@ static const int    MAX_PLAN_ATTEMPTS = 20;    // quanti candidati provare a pia
 // stessa identica logica, quali pose sarebbero ottimali se il CANE fosse spostato di
 // lato. 0.0 = posizione reale (l'unica realmente pianificabile/eseguibile); le altre
 // sono solo "what-if" valutate e disegnate in RViz. Modifica BASE_SHIFT_Y per l'entita' [m].
-static const double BASE_SHIFT_Y = 0.80;   // [m]
+static const double BASE_SHIFT_Y = 0.50;   // [m]
 static const std::vector<double> BASE_OFFSETS_Y = {0.0, BASE_SHIFT_Y, -BASE_SHIFT_Y};
 
 // Il blocco d'ombra "interessante" deve essere causato da un OGGETTO, non dal
@@ -133,7 +133,7 @@ static const bool   EXECUTE_MOTION    = true;  // false = solo pianifica. Utile 
 static const std::string SPOT_GOAL_TOPIC = "goaltospot";
 static const std::string SPOT_GOAL_FRAME = "spot_odom";   // frame in cui e' espresso il goal (odom)
 static const std::string SPOT_BODY_FRAME = "spot_body";   // corpo di Spot (per leggere posa/yaw da TF)
-static const double SPOT_LATERAL_STEP = 0.80;      // [m] passo laterale lungo y_body (coerente con BASE_SHIFT_Y)
+static const double SPOT_LATERAL_STEP = 0.50;      // [m] passo laterale lungo y_body (coerente con BASE_SHIFT_Y)
 static const double SPOT_MOVE_WAIT_S = 12.0;       // [s] attesa (senza feedback) perche' Spot completi lo spostamento
 
 
@@ -288,7 +288,7 @@ public:
 
     // =========================== MODALITA' VALIDAZIONE ===========================
     // Invece di scegliere ed eseguire in automatico la posa migliore, si costruisce una
-    // TABELLA di pose (per ogni base: 10 alte / 10 mediane / 10 basse per score) e si lascia
+    // TABELLA di pose (per ogni base: 15 alte / 15 mediane / 15 basse per score) e si lascia
     // scegliere all'operatore quale eseguire, digitandone l'ID a terminale. Serve a
     // dimostrare che dalla posa "buona" la persona nascosta e' visibile (YOLO) e dalle
     // altre no. La tabella e' una fotografia della scena iniziale: NON si aggiorna.
@@ -640,8 +640,8 @@ private:
     return cands;
   }
 
-  //Costruisce la tabella di validazione: per OGNI base, fino a 30 pose (10 alte, 10 mediane,
-  //10 basse per score). Se una base ha <=30 candidati, li mostra tutti senza duplicati.
+  //Costruisce la tabella di validazione: per OGNI base, fino a 45 pose (15 alte, 15 mediane,
+  //15 basse per score). Se una base ha <=45 candidati, li mostra tutti senza duplicati.
   //cands e' gia' ordinato per score decrescente, quindi il filtro per base preserva l'ordine.
   static std::vector<TableRow> buildTable(const std::vector<Candidate> & cands)
   {
@@ -652,14 +652,14 @@ private:
         if (std::abs(c.base_y - by) < 1e-6) v.push_back(c);
       if (v.empty()) continue;
 
-      if ((int)v.size() <= 30) {                 // poche pose: tutte, senza fasce
+      if ((int)v.size() <= 45) {                 // poche pose: tutte, senza fasce
         for (const auto & c : v) table.push_back({c, "-"});
-      } else {                                   // 10 alte / 10 mediane / 10 basse
+      } else {                                   // 15 alte / 15 mediane / 15 basse
         const int n = (int)v.size();
         const int mid = n / 2;
-        for (int i = 0; i < 10; ++i)               table.push_back({v[i], "ALTA"});
-        for (int i = mid - 5; i <= mid + 4; ++i)   table.push_back({v[i], "MEDIANA"});
-        for (int i = n - 10; i < n; ++i)           table.push_back({v[i], "BASSA"});
+        for (int i = 0; i < 15; ++i)               table.push_back({v[i], "ALTA"});
+        for (int i = mid - 7; i <= mid + 7; ++i)   table.push_back({v[i], "MEDIANA"});
+        for (int i = n - 15; i < n; ++i)           table.push_back({v[i], "BASSA"});
       }
     }
     return table;
