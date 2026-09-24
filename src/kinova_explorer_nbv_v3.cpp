@@ -57,7 +57,7 @@ static const std::string ARM_BASE_FRAME = "base_link";
 static const std::string CAMERA_FRAME   = "camera_link";   // asse ottico = +z
 
 //Spot come box --> protection zone
-static const double SPOT_L = 1.10, SPOT_W = 0.70, SPOT_H = 0.84;
+static const double SPOT_L = 1.10, SPOT_W = 0.75, SPOT_H = 0.84;
 static const double SPOT_CENTER_X = -0.30, SPOT_CENTER_Y = 0.00;
 static const double SPOT_TOP_Z    = 0.00;   // TF: spot_body e base_link stessa z (offset 0). Valutare se mettere offset per la piastra
 static const double SPOT_CENTER_Z = SPOT_TOP_Z - SPOT_H / 2.0;
@@ -103,7 +103,7 @@ static const double CAM_RANGE = 4.0;
 //Campionamento viewpoint DENTRO il workspace del braccio (approssimazione)
 static const std::vector<double> WS_RADII   = {0.40, 0.60, 0.80};   // distanza sferica da base_link
 static const std::vector<double> WS_ELEV_DG = {-30, 0, 30, 60};     // elevazioni (z)
-static const std::vector<double> WS_AZIM_DG = {-90, -60, -30, 0, 30, 60, 90}; // azimut 0 = verso la scena (+x)
+static const std::vector<double> WS_AZIM_DG = {-90, -60, -30, 30, 60, 90}; // azimut 0 = verso la scena (+x); tolto 0 dopo -30
 static const int    MAX_FRONTIER_EVAL = 600;   // sotto-campionamento per lo scoring
 static const int    MAX_PLAN_ATTEMPTS = 50;    // quanti candidati provare a pianificare
 

@@ -103,9 +103,9 @@ static const double CAM_HFOV  = 70.0 * M_PI / 180.0;  // FOV (cono) [rad]
 static const double CAM_RANGE = 4.0;
 
 //Campionamento viewpoint DENTRO il workspace del braccio (approssimazione)
-static const std::vector<double> WS_RADII   = {0.45, 0.60, 0.80};   // distanza sferica da base_link
-static const std::vector<double> WS_ELEV_DG = {-30, 0, 30, 60};     // elevazioni (z)
-static const std::vector<double> WS_AZIM_DG = {-90, -60, -30, 0, 30, 60, 90}; // azimut 0 = verso la scena (+x)
+static const std::vector<double> WS_RADII   = {0.60, 0.75, 0.80};   // distanza sferica da base_link
+static const std::vector<double> WS_ELEV_DG = {-30, 0, 30, 70};     // elevazioni (z)
+static const std::vector<double> WS_AZIM_DG = {-90, -60, -30, 30, 60, 90}; // azimut 0 = verso la scena (+x); tolto 0 dopo -30
 static const int    MAX_FRONTIER_EVAL = 600;   // sotto-campionamento per lo scoring
 static const int    MAX_PLAN_ATTEMPTS = 20;    // quanti candidati provare a pianificare
 
